@@ -2,6 +2,8 @@
 
 Arduino-sketch voor een **maanfaseklok** op een ronde **GC9A01 TFT (240×240)** met **LVGL**, voor **ESP32-S3 SuperMini**.
 
+![Maanstand display – ronde TFT met maanfase, Wicca-seizoen en datum/tijd](maanstand_voorbeeld.png)
+
 ## Functies
 
 - Actuele maanfase met realistische sikkel en schaduw
