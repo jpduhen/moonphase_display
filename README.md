@@ -15,8 +15,12 @@ Arduino-sketch voor een **maanfaseklok** op een ronde **GC9A01 TFT (240×240)** 
 ## Hardware
 
 - **ESP32-S3 SuperMini**
-- **GC9A01** ronde TFT 240×240
+- **GC9A01** ronde TFT 240×240 (SPI: MISO, MOSI, SCK, CS, DC, RST)
 - TFT_eSPI met passende `User_Setup` (o.a. GC9A01, ESP32-S3 pinnen)
+
+*Aansluitingen (achterkant): display via header op de SuperMini, plus eventueel losse draden voor voedings- of signaalpinnen.*
+
+![Achterkant: GC9A01-display aangesloten op ESP32-S3 SuperMini](maanstand_aansluitingen.png)
 
 ## Bibliotheken
 
