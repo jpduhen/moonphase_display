@@ -20,6 +20,14 @@ using namespace fs;       // Zorgt dat FS in scope is voor WebServer.h
 #include "moon_image.h"
 #include "SunMoonCalc.h"
 
+/** 1 = samenstanden maan–planeet tonen (iconen op maanrand).
+ *  Vereist: planet_images.h (alle 7 planeet-iconen in één bestand, zoals zodiac_images.h). */
+#define USE_PLANET_CONJUNCTIONS 1
+#if USE_PLANET_CONJUNCTIONS
+#include "PlanetConjunctions.h"
+#include "planet_images.h"
+#endif
+
 #define WIFI_AP_NAAM "Maanstand_WiFi"   // AP-naam bij eerste keer / geen opgeslagen netwerk
 #define NTP_SERVER "pool.ntp.org"
 #define PREF_NAAM   "maanstand"
@@ -35,8 +43,9 @@ static WebServer server(80);
 #define UI_LANG_NL 1
 
 #define PREF_LANG      "lang"
-#define PREF_SHOW_DATE "showDate"
 #define PREF_SHOW_ZODIAC "showZodiac"
+#define PREF_SHOW_CONJUNCTIONS "showConj"
+#define PREF_CONJ_TEST "conjTest"
 #define DEFAULT_LANG   "nl"
 
 /** Zodiac-icoontjes op de maan: 1 = aan (gebruik zodiac_images.h), 0 = uit (alleen placeholder) */
@@ -52,6 +61,8 @@ static WebServer server(80);
 #define CY 120
 #define MOON_R 88
 #define MOON_SZ (MOON_R * 2)
+/** Straal voor planeeticonen op de maanrand (12 px kleiner dan maan), zodat alle iconen binnen de maancirkel vallen. */
+#define PLANET_RIM_R  (MOON_R - 12)
 
 #define DRAW_BUF_SIZE (TFT_HOR_RES * TFT_VER_RES / 10 * (LV_COLOR_DEPTH / 8))
 static uint32_t draw_buf[DRAW_BUF_SIZE / 4];
@@ -101,8 +112,11 @@ static lv_obj_t * arclabelRise  = NULL;  // maan opkomst HH:MM @ 225° (links-on
 static lv_obj_t * arclabelOnder = NULL;  // huidige tijd HH:MM:SS @ 180° (onder, midden)
 static lv_obj_t * arclabelSet   = NULL;  // maan ondergang HH:MM @ 135° (rechts-onder)
 static lv_obj_t * labelZodiacName = NULL;  // Ram, Stier, …
-static lv_obj_t * labelDate = NULL;       // DD-MM-YYYY boven de zodiac
 static lv_obj_t * zodiacImg = NULL;       // overlay-afbeelding met alpha over de maan
+
+#if USE_PLANET_CONJUNCTIONS
+static lv_obj_t* planetIcons[PLANET_COUNT] = { NULL };  // planeeticonen op maanrand
+#endif
 
 // Zodiac-afbeeldingen: standaard een onzichtbare placeholder. Zie zodiac_images.h om 12 PNG's (met alpha) toe te voegen.
 #ifndef USE_ZODIAC_IMAGES
@@ -178,21 +192,23 @@ static void getLatLon(float& lat, float& lon) {
   lon = slon.toFloat();
 }
 
-/** Haalt displayvoorkeuren op: taal (langNL) en of datum/zodiac op het scherm getoond moeten worden. */
-static void getDisplayPrefs(bool& showDate, bool& showZodiac, bool& langNL) {
+/** Haalt displayvoorkeuren op: taal (langNL), zodiac/conjuncties, conjunctie-testmodus. */
+static void getDisplayPrefs(bool& showZodiac, bool& showConjunctions, bool& conjTestMode, bool& langNL) {
   Preferences prefs;
   prefs.begin(PREF_NAAM, true);
-  showDate   = (prefs.getString(PREF_SHOW_DATE, "1") == "1");
-  showZodiac = (prefs.getString(PREF_SHOW_ZODIAC, "1") == "1");
-  langNL     = (prefs.getString(PREF_LANG, DEFAULT_LANG) != "en");
+  showZodiac       = (prefs.getString(PREF_SHOW_ZODIAC, "1") == "1");
+  showConjunctions = (prefs.getString(PREF_SHOW_CONJUNCTIONS, "1") == "1");
+  conjTestMode     = (prefs.getString(PREF_CONJ_TEST, "0") == "1");
+  langNL           = (prefs.getString(PREF_LANG, DEFAULT_LANG) != "en");
   prefs.end();
 }
 
 /** Astronomische maandata via SunMoonCalc (locatie-afhankelijk). vult illumPct, fi, leeftijd, fase.
- *  Optioneel: riseStr/setStr/transitStr (lokale tijd HH:MM), angleDeg (verlichtingshoek zon–maan in graden). */
+ *  Optioneel: riseStr/setStr/transitStr, angleDeg, moon_az_deg/moon_el_deg (voor samenstanden). */
 static void getMoonData(float& illumPct, int& fi, float& leeftijd, float& fase,
                         char* riseStr, size_t riseLen, char* setStr, size_t setLen,
-                        char* transitStr, size_t transitLen, float* angleDeg) {
+                        char* transitStr, size_t transitLen, float* angleDeg,
+                        float* moon_az_deg = nullptr, float* moon_el_deg = nullptr) {
   time_t now;
   time(&now);
   float lat, lon;
@@ -220,6 +236,8 @@ static void getMoonData(float& illumPct, int& fi, float& leeftijd, float& fase,
     else transitStr[0] = '\0';
   }
   if (angleDeg) *angleDeg = (float)(r.moon.brightLimbAngle * 57.29577951308232);  // rad naar graden
+  if (moon_az_deg) *moon_az_deg = (float)r.moon.azimuth;
+  if (moon_el_deg) *moon_el_deg = (float)r.moon.elevation;
 }
 
 /** Format time_t als "DD-MM-YYYY HH:MM" of "—" als ongeldig. */
@@ -240,27 +258,55 @@ static void serveSettings() {
   String lon = prefs.getString("lon", DEFAULT_LON);
   String tz  = prefs.getString("tz", DEFAULT_TZ);
   String lang = prefs.getString(PREF_LANG, DEFAULT_LANG);
-  String sd = prefs.getString(PREF_SHOW_DATE, "1");
   String sz = prefs.getString(PREF_SHOW_ZODIAC, "1");
+  String sc = prefs.getString(PREF_SHOW_CONJUNCTIONS, "1");
+  String st = prefs.getString(PREF_CONJ_TEST, "0");
   prefs.end();
-  String html = F("<!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Instellingen — Maanstand</title><style>");
+  bool isNL = (lang != "en");
+  String html = F("<!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>");
+  html += isNL ? F("Instellingen — Maanstand") : F("Settings — Moon phase");
+  html += F("</title><style>");
   html += FPSTR(WEB_CSS);
-  html += F("</style></head><body><div class='wrap'><nav><span>Maanstand</span><a href='/'>Data</a></nav><h1>Instellingen</h1><div class='card'><form method='post' action='/save'>");
-  html += F("<div class='row'><label>Breedtegraad (lat)</label><input type='text' name='lat' value='");
+  html += F("</style></head><body><div class='wrap'><nav><span>");
+  html += isNL ? F("Maanstand") : F("Moon phase");
+  html += F("</span><a href='/'>Data</a></nav><h1>");
+  html += isNL ? F("Instellingen") : F("Settings");
+  html += F("</h1><div class='card'><form method='post' action='/save'>");
+  html += F("<div class='row'><label>");
+  html += isNL ? F("Breedtegraad (lat)") : F("Latitude (lat)");
+  html += F("</label><input type='text' name='lat' value='");
   html += lat;
-  html += F("' /></div><div class='row'><label>Lengtegraad (lon)</label><input type='text' name='lon' value='");
+  html += F("' /></div><div class='row'><label>");
+  html += isNL ? F("Lengtegraad (lon)") : F("Longitude (lon)");
+  html += F("</label><input type='text' name='lon' value='");
   html += lon;
-  html += F("' /></div><div class='row'><label>Tijdzone (TZ)</label><input type='text' name='tz' value='");
+  html += F("' /></div><div class='row'><label>");
+  html += isNL ? F("Tijdzone (TZ)") : F("Time zone (TZ)");
+  html += F("</label><input type='text' name='tz' value='");
   html += tz;
-  html += F("' style='max-width:100%' /></div><div class='row'><label>Taal</label><select name='lang'><option value='nl'");
+  html += F("' style='max-width:100%' /></div><div class='row'><label>");
+  html += isNL ? F("Taal") : F("Language");
+  html += F("</label><select name='lang'><option value='nl'");
   if (lang == "nl") html += F(" selected");
   html += F(">Nederlands</option><option value='en'");
   if (lang == "en") html += F(" selected");
-  html += F(">English</option></select></div><div class='row'><label>Op het scherm tonen</label><div class='chk'><input type='checkbox' name='showDate' id='showDate' value='1'");
-  if (sd == "1") html += F(" checked");
-  html += F(" /><label for='showDate' style='display:inline;margin:0'>Datum</label></div><div class='chk'><input type='checkbox' name='showZodiac' id='showZodiac' value='1'");
+  html += F(">English</option></select></div><div class='row'><label>");
+  html += isNL ? F("Op het scherm tonen") : F("Show on screen");
+  html += F("</label><div class='chk'><input type='checkbox' name='showZodiac' id='showZodiac' value='1'");
   if (sz == "1") html += F(" checked");
-  html += F(" /><label for='showZodiac' style='display:inline;margin:0'>Zodiac / sterrenbeeld</label></div></div><button type='submit'>Opslaan</button></form></div></div></body></html>");
+  html += F(" /><label for='showZodiac' style='display:inline;margin:0'>");
+  html += isNL ? F("Zodiac / sterrenbeeld") : F("Zodiac / sign");
+  html += F("</label></div><div class='chk'><input type='checkbox' name='showConj' id='showConj' value='1'");
+  if (sc == "1") html += F(" checked");
+  html += F(" /><label for='showConj' style='display:inline;margin:0'>");
+  html += isNL ? F("Conjuncties (planeten)") : F("Conjunctions (planets)");
+  html += F("</label></div><div class='chk'><input type='checkbox' name='conjTest' id='conjTest' value='1'");
+  if (st == "1") html += F(" checked");
+  html += F(" /><label for='conjTest' style='display:inline;margin:0'>");
+  html += isNL ? F("Conjuncties testmodus (alle planeten op positie)") : F("Conjunctions test mode (all planets at position)");
+  html += F("</label></div></div><button type='submit'>");
+  html += isNL ? F("Opslaan") : F("Save");
+  html += F("</button></form></div></div></body></html>");
   server.send(200, "text/html; charset=utf-8", html);
 }
 
@@ -271,16 +317,18 @@ static void handleSave() {
   String tz  = server.hasArg("tz")  ? server.arg("tz")  : String(DEFAULT_TZ);
   String lang = server.hasArg("lang") ? server.arg("lang") : String(DEFAULT_LANG);
   if (lang != "en") lang = "nl";
-  String showDate = server.hasArg("showDate") ? "1" : "0";
   String showZodiac = server.hasArg("showZodiac") ? "1" : "0";
+  String showConjunctions = server.hasArg("showConj") ? "1" : "0";
+  String conjTest = server.hasArg("conjTest") ? "1" : "0";
   Preferences prefs;
   prefs.begin(PREF_NAAM, false);
   prefs.putString("lat", lat);
   prefs.putString("lon", lon);
   prefs.putString("tz", tz);
   prefs.putString(PREF_LANG, lang);
-  prefs.putString(PREF_SHOW_DATE, showDate);
   prefs.putString(PREF_SHOW_ZODIAC, showZodiac);
+  prefs.putString(PREF_SHOW_CONJUNCTIONS, showConjunctions);
+  prefs.putString(PREF_CONJ_TEST, conjTest);
   prefs.end();
   Serial.println("Web: instellingen opgeslagen");
   server.sendHeader("Location", "/");
@@ -288,6 +336,10 @@ static void handleSave() {
 }
 
 static void serveData() {
+  Preferences prefs;
+  prefs.begin(PREF_NAAM, true);
+  bool isNL = (prefs.getString(PREF_LANG, DEFAULT_LANG) != "en");
+  prefs.end();
   float lat, lon;
   getLatLon(lat, lon);
   time_t now;
@@ -295,46 +347,160 @@ static void serveData() {
   SunMoonCalc calc(now, (double)lat, (double)lon);
   SunMoonCalc::Result r = calc.calculateSunAndMoonData();
   char buf[32];
-  String html = F("<!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Maanstand — Data</title><style>");
+  String html = F("<!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>");
+  html += isNL ? F("Maanstand — Data") : F("Moon phase — Data");
+  html += F("</title><style>");
   html += FPSTR(WEB_CSS);
-  html += F("</style></head><body><div class='wrap'><nav><span>Maanstand</span><a href='/settings'>Instellingen</a></nav><h1>Berekende data</h1>");
-  html += F("<div class='card'><p style='margin:0 0 0.75rem'><strong>Locatie</strong> ");
+  html += F("</style></head><body><div class='wrap'><nav><span>");
+  html += isNL ? F("Maanstand") : F("Moon phase");
+  html += F("</span><a href='/settings'>");
+  html += isNL ? F("Instellingen") : F("Settings");
+  html += F("</a></nav><h1>");
+  html += isNL ? F("Berekende data") : F("Computed data");
+  html += F("</h1><div class='card'><p style='margin:0 0 0.75rem'><strong>");
+  html += isNL ? F("Locatie") : F("Location");
+  html += F("</strong> ");
   html += String(lat, 4) + ", " + String(lon, 4);
-  html += F(" &nbsp;·&nbsp; <strong>Lunare cyclus</strong> ");
+  html += F(" &nbsp;·&nbsp; <strong>");
+  html += isNL ? F("Lunare cyclus") : F("Lunar cycle");
+  html += F("</strong> ");
   html += String(LUNAR_CYCLE_DAYS, 4);
-  html += F(" dagen</p><h2>Zon</h2><table><tr><th>Veld</th><th>Waarde</th></tr>");
+  html += isNL ? F(" dagen</p><h2>Zon</h2><table><tr><th>Veld</th><th>Waarde</th></tr>") : F(" days</p><h2>Sun</h2><table><tr><th>Field</th><th>Value</th></tr>");
   formatTime(r.sun.rise, buf, sizeof(buf));
-  html += F("<tr><td>Opkomst</td><td>"); html += buf; html += F("</td></tr>");
+  html += F("<tr><td>"); html += isNL ? F("Opkomst") : F("Rise"); html += F("</td><td id='v_sun_rise'>"); html += buf; html += F("</td></tr>");
   formatTime(r.sun.transit, buf, sizeof(buf));
-  html += F("<tr><td>Doorgang</td><td>"); html += buf; html += F("</td></tr>");
+  html += F("<tr><td>"); html += isNL ? F("Doorgang") : F("Transit"); html += F("</td><td id='v_sun_transit'>"); html += buf; html += F("</td></tr>");
   formatTime(r.sun.set, buf, sizeof(buf));
-  html += F("<tr><td>Ondergang</td><td>"); html += buf; html += F("</td></tr>");
-  html += F("<tr><td>Azimut (°)</td><td>"); html += String(r.sun.azimuth, 2) + F("</td></tr>");
-  html += F("<tr><td>Elevatie (°)</td><td>"); html += String(r.sun.elevation, 2) + F("</td></tr>");
-  html += F("<tr><td>Elevatie doorgang (°)</td><td>"); html += String(r.sun.transitElevation, 2) + F("</td></tr>");
-  html += F("<tr><td>Afstand (km)</td><td>"); html += String(r.sun.distance, 0) + F("</td></tr></table></div>");
-  html += F("<div class='card'><h2>Maan</h2><table><tr><th>Veld</th><th>Waarde</th></tr>");
+  html += F("<tr><td>"); html += isNL ? F("Ondergang") : F("Set"); html += F("</td><td id='v_sun_set'>"); html += buf; html += F("</td></tr>");
+  html += F("<tr><td>"); html += isNL ? F("Azimut (°)") : F("Azimuth (°)"); html += F("</td><td id='v_sun_az'>"); html += String(r.sun.azimuth, 2) + F("</td></tr>");
+  html += F("<tr><td>"); html += isNL ? F("Elevatie (°)") : F("Elevation (°)"); html += F("</td><td id='v_sun_el'>"); html += String(r.sun.elevation, 2) + F("</td></tr>");
+  html += F("<tr><td>"); html += isNL ? F("Elevatie doorgang (°)") : F("Transit elevation (°)"); html += F("</td><td id='v_sun_el_tr'>"); html += String(r.sun.transitElevation, 2) + F("</td></tr>");
+  html += F("<tr><td>"); html += isNL ? F("Afstand (km)") : F("Distance (km)"); html += F("</td><td id='v_sun_dist'>"); html += String(r.sun.distance, 0) + F("</td></tr></table></div>");
+  html += F("<div class='card'><h2>"); html += isNL ? F("Maan") : F("Moon"); html += F("</h2><table><tr><th>"); html += isNL ? F("Veld") : F("Field"); html += F("</th><th>"); html += isNL ? F("Waarde") : F("Value"); html += F("</th></tr>");
   formatTime(r.moon.rise, buf, sizeof(buf));
-  html += F("<tr><td>Opkomst</td><td>"); html += buf; html += F("</td></tr>");
+  html += F("<tr><td>"); html += isNL ? F("Opkomst") : F("Rise"); html += F("</td><td id='v_moon_rise'>"); html += buf; html += F("</td></tr>");
   formatTime(r.moon.transit, buf, sizeof(buf));
-  html += F("<tr><td>Doorgang</td><td>"); html += buf; html += F("</td></tr>");
+  html += F("<tr><td>"); html += isNL ? F("Doorgang") : F("Transit"); html += F("</td><td id='v_moon_transit'>"); html += buf; html += F("</td></tr>");
   formatTime(r.moon.set, buf, sizeof(buf));
-  html += F("<tr><td>Ondergang</td><td>"); html += buf; html += F("</td></tr>");
-  html += F("<tr><td>Azimut (°)</td><td>"); html += String(r.moon.azimuth, 2) + F("</td></tr>");
-  html += F("<tr><td>Elevatie (°)</td><td>"); html += String(r.moon.elevation, 2) + F("</td></tr>");
-  html += F("<tr><td>Elevatie doorgang (°)</td><td>"); html += String(r.moon.transitElevation, 2) + F("</td></tr>");
-  html += F("<tr><td>Leeftijd (dagen)</td><td>"); html += String(r.moon.age, 3) + F("</td></tr>");
-  html += F("<tr><td>Fase in cyclus (0–1)</td><td>"); html += String((float)(r.moon.age / (double)LUNAR_CYCLE_DAYS), 4) + F("</td></tr>");
-  html += F("<tr><td>Verlichting (0–1)</td><td>"); html += String(r.moon.illumination, 4) + F("</td></tr>");
-  html += F("<tr><td>Fase-index</td><td>"); html += String(r.moon.phase.index) + " " + r.moon.phase.name + F("</td></tr>");
-  html += F("<tr><td>Afstand (km)</td><td>"); html += String(r.moon.distance, 0) + F("</td></tr>");
+  html += F("<tr><td>"); html += isNL ? F("Ondergang") : F("Set"); html += F("</td><td id='v_moon_set'>"); html += buf; html += F("</td></tr>");
+  html += F("<tr><td>"); html += isNL ? F("Azimut (°)") : F("Azimuth (°)"); html += F("</td><td id='v_moon_az'>"); html += String(r.moon.azimuth, 2) + F("</td></tr>");
+  html += F("<tr><td>"); html += isNL ? F("Elevatie (°)") : F("Elevation (°)"); html += F("</td><td id='v_moon_el'>"); html += String(r.moon.elevation, 2) + F("</td></tr>");
+  html += F("<tr><td>"); html += isNL ? F("Elevatie doorgang (°)") : F("Transit elevation (°)"); html += F("</td><td id='v_moon_el_tr'>"); html += String(r.moon.transitElevation, 2) + F("</td></tr>");
+  html += F("<tr><td>"); html += isNL ? F("Leeftijd (dagen)") : F("Age (days)"); html += F("</td><td id='v_moon_age'>"); html += String(r.moon.age, 3) + F("</td></tr>");
+  html += F("<tr><td>"); html += isNL ? F("Fase in cyclus (0–1)") : F("Phase in cycle (0–1)"); html += F("</td><td id='v_moon_phase_cycle'>"); html += String((float)(r.moon.age / (double)LUNAR_CYCLE_DAYS), 4) + F("</td></tr>");
+  html += F("<tr><td>"); html += isNL ? F("Verlichting (0–1)") : F("Illumination (0–1)"); html += F("</td><td id='v_moon_illum'>"); html += String(r.moon.illumination, 4) + F("</td></tr>");
+  html += F("<tr><td>"); html += isNL ? F("Fase-index") : F("Phase index"); html += F("</td><td id='v_moon_phase'>"); html += String(r.moon.phase.index) + " " + r.moon.phase.name + F("</td></tr>");
+  html += F("<tr><td>"); html += isNL ? F("Afstand (km)") : F("Distance (km)"); html += F("</td><td id='v_moon_dist'>"); html += String(r.moon.distance, 0) + F("</td></tr>");
   double deg = r.moon.axisPositionAngle * 57.29577951308232;
-  html += F("<tr><td>Axis position angle (°)</td><td>"); html += String(deg, 2) + F("</td></tr>");
+  html += F("<tr><td>Axis position angle (°)</td><td id='v_moon_axis'>"); html += String(deg, 2) + F("</td></tr>");
   deg = r.moon.brightLimbAngle * 57.29577951308232;
-  html += F("<tr><td>Bright limb angle (°)</td><td>"); html += String(deg, 2) + F("</td></tr>");
+  html += F("<tr><td>Bright limb angle (°)</td><td id='v_moon_bright'>"); html += String(deg, 2) + F("</td></tr>");
   deg = r.moon.parallacticAngle * 57.29577951308232;
-  html += F("<tr><td>Parallactic angle (°)</td><td>"); html += String(deg, 2) + F("</td></tr></table></div></div></body></html>");
+  html += F("<tr><td>Parallactic angle (°)</td><td id='v_moon_parallactic'>"); html += String(deg, 2) + F("</td></tr></table></div>");
+#if USE_PLANET_CONJUNCTIONS
+  {
+    PlanetObserver obs;
+    planetObserverSet(&obs, (double)lat, (double)lon, 0.0);
+    ConjunctionEvent conj[PLANET_CONJ_MAX];
+    int n_conj = planetFindConjunctions(r.moon.azimuth, r.moon.elevation, now, &obs, PLANET_CONJ_SEP_LIMIT_DEG, conj);
+    static const char* planetNamesNL[] = { "Mercurius", "Venus", "Mars", "Jupiter", "Saturnus", "Uranus", "Neptunus" };
+    static const char* planetNamesEN[] = { "Mercury", "Venus", "Mars", "Jupiter", "Saturn", "Uranus", "Neptune" };
+    for (int p = 0; p < PLANET_COUNT; p++) {
+      SkyPosition sky;
+      bool has_pos = getPlanetTopocentricPosition((PlanetId)p, now, &obs, &sky);
+      float sep_deg = -1.0f;
+      for (int c = 0; c < n_conj; c++) { if (conj[c].planet_id == (PlanetId)p) { sep_deg = conj[c].separation_deg; break; } }
+      html += F("<div class='card'><h2>");
+      html += isNL ? planetNamesNL[p] : planetNamesEN[p];
+      html += F("</h2><table><tr><th>"); html += isNL ? F("Veld") : F("Field"); html += F("</th><th>"); html += isNL ? F("Waarde") : F("Value"); html += F("</th></tr>");
+      if (has_pos) {
+        html += F("<tr><td>"); html += isNL ? F("Azimut (°)") : F("Azimuth (°)"); html += F("</td><td id='v_p"); html += String(p); html += F("_az'>"); html += String(sky.az_deg, 2) + F("</td></tr>");
+        html += F("<tr><td>"); html += isNL ? F("Elevatie (°)") : F("Elevation (°)"); html += F("</td><td id='v_p"); html += String(p); html += F("_el'>"); html += String(sky.el_deg, 2) + F("</td></tr>");
+      } else {
+        html += F("<tr><td>"); html += isNL ? F("Azimut (°)") : F("Azimuth (°)"); html += F("</td><td id='v_p"); html += String(p); html += F("_az'>—</td></tr><tr><td>"); html += isNL ? F("Elevatie (°)") : F("Elevation (°)"); html += F("</td><td id='v_p"); html += String(p); html += F("_el'>—</td></tr>");
+      }
+      html += F("<tr><td>"); html += isNL ? F("Samenstand met maan") : F("Conjunction with moon"); html += F("</td><td id='v_p"); html += String(p); html += F("_conj'>");
+      if (sep_deg >= 0.0f) {
+        html += String(sep_deg, 1) + (isNL ? F("° (binnen ") : F("° (within "));
+        html += String((float)PLANET_CONJ_SEP_LIMIT_DEG, 0) + F("°)</td></tr>");
+      } else {
+        html += isNL ? F("nee</td></tr>") : F("no</td></tr>");
+      }
+      html += F("</table></div>");
+    }
+  }
+#endif
+  html += F("<script>function upd(){fetch('/api/data').then(r=>r.json()).then(d=>{for(var k in d){var e=document.getElementById(k);if(e)e.textContent=d[k];}}).catch(()=>{});}setInterval(upd,30000);</script></div></body></html>");
   server.send(200, "text/html; charset=utf-8", html);
+}
+
+/** API: alleen waarden als JSON voor automatische verversing zonder pagina-reload. */
+static void serveDataJson() {
+  Preferences prefs;
+  prefs.begin(PREF_NAAM, true);
+  bool isNL = (prefs.getString(PREF_LANG, DEFAULT_LANG) != "en");
+  prefs.end();
+  float lat, lon;
+  getLatLon(lat, lon);
+  time_t now;
+  time(&now);
+  SunMoonCalc calc(now, (double)lat, (double)lon);
+  SunMoonCalc::Result r = calc.calculateSunAndMoonData();
+  char buf[32];
+  String json = F("{\"v_sun_rise\":\"");
+  formatTime(r.sun.rise, buf, sizeof(buf)); json += buf;
+  json += F("\",\"v_sun_transit\":\""); formatTime(r.sun.transit, buf, sizeof(buf)); json += buf;
+  json += F("\",\"v_sun_set\":\""); formatTime(r.sun.set, buf, sizeof(buf)); json += buf;
+  json += "\",\"v_sun_az\":\"" + String(r.sun.azimuth, 2) + F("\",\"v_sun_el\":\"") + String(r.sun.elevation, 2) +
+          F("\",\"v_sun_el_tr\":\"") + String(r.sun.transitElevation, 2) + F("\",\"v_sun_dist\":\"") + String(r.sun.distance, 0) + "\"";
+  json += F(",\"v_moon_rise\":\"");
+  formatTime(r.moon.rise, buf, sizeof(buf)); json += buf;
+  json += F("\",\"v_moon_transit\":\""); formatTime(r.moon.transit, buf, sizeof(buf)); json += buf;
+  json += F("\",\"v_moon_set\":\""); formatTime(r.moon.set, buf, sizeof(buf)); json += buf;
+  json += "\",\"v_moon_az\":\"" + String(r.moon.azimuth, 2) + F("\",\"v_moon_el\":\"") + String(r.moon.elevation, 2) +
+          F("\",\"v_moon_el_tr\":\"") + String(r.moon.transitElevation, 2) + F("\",\"v_moon_age\":\"") + String(r.moon.age, 3) +
+          F("\",\"v_moon_phase_cycle\":\"") + String((float)(r.moon.age / (double)LUNAR_CYCLE_DAYS), 4) +
+          F("\",\"v_moon_illum\":\"") + String(r.moon.illumination, 4) + F("\",\"v_moon_phase\":\"") + String(r.moon.phase.index) + " " + String(r.moon.phase.name) +
+          "\",\"v_moon_dist\":\"" + String(r.moon.distance, 0) + "\"";
+  double deg = r.moon.axisPositionAngle * 57.29577951308232;
+  json += F(",\"v_moon_axis\":\"");
+  json += String(deg, 2);
+  json += "\"";
+  deg = r.moon.brightLimbAngle * 57.29577951308232;
+  json += F(",\"v_moon_bright\":\"");
+  json += String(deg, 2);
+  json += "\"";
+  deg = r.moon.parallacticAngle * 57.29577951308232;
+  json += F(",\"v_moon_parallactic\":\"");
+  json += String(deg, 2);
+  json += "\"";
+#if USE_PLANET_CONJUNCTIONS
+  {
+    PlanetObserver obs;
+    planetObserverSet(&obs, (double)lat, (double)lon, 0.0);
+    ConjunctionEvent conj[PLANET_CONJ_MAX];
+    int n_conj = planetFindConjunctions(r.moon.azimuth, r.moon.elevation, now, &obs, PLANET_CONJ_SEP_LIMIT_DEG, conj);
+    const char* noConj = isNL ? "nee" : "no";
+    for (int p = 0; p < PLANET_COUNT; p++) {
+      SkyPosition sky;
+      bool has_pos = getPlanetTopocentricPosition((PlanetId)p, now, &obs, &sky);
+      float sep_deg = -1.0f;
+      for (int c = 0; c < n_conj; c++) { if (conj[c].planet_id == (PlanetId)p) { sep_deg = conj[c].separation_deg; break; } }
+      String pid = "v_p" + String(p);
+      if (has_pos) {
+        json += ",\"" + pid + "_az\":\"" + String(sky.az_deg, 2) + "\",\"" + pid + "_el\":\"" + String(sky.el_deg, 2) + "\"";
+      } else {
+        json += ",\"" + pid + "_az\":\"—\",\"" + pid + "_el\":\"—\"";
+      }
+      if (sep_deg >= 0.0f)
+        json += ",\"" + pid + "_conj\":\"" + String(sep_deg, 1) + "°\"";
+      else
+        json += ",\"" + pid + "_conj\":\"" + String(noConj) + "\"";
+    }
+  }
+#endif
+  json += F("}");
+  server.send(200, "application/json", json);
 }
 
 /** Gegeven gewenste verlichte fractie L (0..1), retourneer afstand tussen middelpunten
@@ -502,8 +668,8 @@ static void maanstandUI(lv_obj_t * screen) {
 #endif
 
   // Bovenste regel: "Seizoen - DD-MM-YY - Maanfase", gebogen BOVENAAN.
-  bool showDate, showZodiac, langNL;
-  getDisplayPrefs(showDate, showZodiac, langNL);
+  bool showZodiac, showConjunctions, conjTestMode, langNL;
+  getDisplayPrefs(showZodiac, showConjunctions, conjTestMode, langNL);
   const char* const* faseNamen = langNL ? faseNamenNL : faseNamenEN;
   static char bovenBuf[56];
   struct tm t;
@@ -594,20 +760,7 @@ static void maanstandUI(lv_obj_t * screen) {
   lv_arclabel_set_text_horizontal_align(arclabelSet, LV_ARCLABEL_TEXT_ALIGN_CENTER);
   lv_obj_center(arclabelSet);
 
-  // Datum, zodiac en tijd: altijd aanmaken; zichtbaarheid wordt in maanstandUpdate() uit prefs gezet (direct doorgevoerd).
-  labelDate = lv_label_create(screen);
-  if (getLocalTime(&t)) {
-    static char dateBuf[16];
-    snprintf(dateBuf, sizeof(dateBuf), "%02d-%02d-%04d", t.tm_mday, t.tm_mon + 1, t.tm_year + 1900);
-    lv_label_set_text(labelDate, dateBuf);
-  } else {
-    lv_label_set_text(labelDate, "--");
-  }
-  lv_obj_set_style_text_color(labelDate, textColor2, LV_PART_MAIN);
-  lv_obj_set_style_text_font(labelDate, &lv_font_montserrat_14, LV_PART_MAIN);
-  lv_obj_align(labelDate, LV_ALIGN_CENTER, 0, -58);
-  if (!showDate) lv_obj_add_flag(labelDate, LV_OBJ_FLAG_HIDDEN);
-
+  // Zodiac en tijd: zichtbaarheid wordt in maanstandUpdate() uit prefs gezet (direct doorgevoerd).
   const char* const* zodiacNamen = langNL ? zodiacNamenNL : zodiacNamenEN;
   int zi = getLocalTime(&t) ? zodiacIndex(t.tm_mon + 1, t.tm_mday) : 0;
   zodiacImg = lv_image_create(screen);
@@ -628,10 +781,24 @@ static void maanstandUI(lv_obj_t * screen) {
   lv_obj_align(labelZodiacName, LV_ALIGN_CENTER, 0, 40);
   if (!showZodiac) lv_obj_add_flag(labelZodiacName, LV_OBJ_FLAG_HIDDEN);
 
+#if USE_PLANET_CONJUNCTIONS
+  for (int i = 0; i < PLANET_COUNT; i++) {
+    planetIcons[i] = lv_image_create(screen);
+    lv_image_set_src(planetIcons[i], planetImgDsc[i]);
+    lv_obj_set_size(planetIcons[i], 24, 40);
+    lv_obj_set_style_bg_opa(planetIcons[i], LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_image_recolor(planetIcons[i], lv_color_hex(0x6B4E9E), LV_PART_MAIN);
+    lv_obj_set_style_image_recolor_opa(planetIcons[i], LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_add_flag(planetIcons[i], LV_OBJ_FLAG_HIDDEN);
+  }
+#endif
+
 #if USE_SPHERE_TERMINATOR
   lv_obj_move_foreground(zodiacImg);
-  lv_obj_move_foreground(labelDate);
   lv_obj_move_foreground(labelZodiacName);
+#if USE_PLANET_CONJUNCTIONS
+  for (int i = 0; i < PLANET_COUNT; i++) if (planetIcons[i]) lv_obj_move_foreground(planetIcons[i]);
+#endif
 #endif
 }
 
@@ -642,20 +809,50 @@ static void maanstandUpdate() {
   if (!arclabelFase || !arclabelRise || !arclabelOnder || !arclabelSet || !shadowObj || !shadowImg) return;
 #endif
   float illumPct, leeftijd, fase, angleDeg;
+  float moon_az_deg = 0.0f, moon_el_deg = 0.0f;
   int fi;
   char riseStr[8], setStr[8], transitStr[8];
   riseStr[0] = setStr[0] = transitStr[0] = '\0';
   getMoonData(illumPct, fi, leeftijd, fase, riseStr, sizeof(riseStr), setStr, sizeof(setStr),
-              transitStr, sizeof(transitStr), &angleDeg);
-  bool showDate, showZodiac, langNL;
-  getDisplayPrefs(showDate, showZodiac, langNL);
+              transitStr, sizeof(transitStr), &angleDeg, &moon_az_deg, &moon_el_deg);
+  bool showZodiac, showConjunctions, conjTestMode, langNL;
+  getDisplayPrefs(showZodiac, showConjunctions, conjTestMode, langNL);
   const char* const* faseNamen = langNL ? faseNamenNL : faseNamenEN;
   const char* const* zodiacNamen = langNL ? zodiacNamenNL : zodiacNamenEN;
 
-  /* Zichtbaarheid datum/zodiac direct uit instellingen (zonder herstart) */
-  if (labelDate) { if (showDate) lv_obj_clear_flag(labelDate, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(labelDate, LV_OBJ_FLAG_HIDDEN); }
+  /* Zichtbaarheid zodiac direct uit instellingen (zonder herstart) */
   if (zodiacImg) { if (showZodiac) lv_obj_clear_flag(zodiacImg, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(zodiacImg, LV_OBJ_FLAG_HIDDEN); }
   if (labelZodiacName) { if (showZodiac) lv_obj_clear_flag(labelZodiacName, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(labelZodiacName, LV_OBJ_FLAG_HIDDEN); }
+
+#if USE_PLANET_CONJUNCTIONS
+  if (showConjunctions) {
+    PlanetObserver obs;
+    float lat, lon;
+    getLatLon(lat, lon);
+    planetObserverSet(&obs, (double)lat, (double)lon, 0.0);
+    time_t now; time(&now);
+    ConjunctionEvent events[PLANET_CONJ_MAX];
+    float maxSep = conjTestMode ? 180.0f : (float)PLANET_CONJ_SEP_LIMIT_DEG;
+    int n = planetFindConjunctions((double)moon_az_deg, (double)moon_el_deg, now, &obs,
+                                   maxSep, events);
+    PlanetRimRenderInfo render[PLANET_CONJ_MAX];
+    planetComputeRimPositions(events, n, CX, CY, PLANET_RIM_R, render);
+    for (int i = 0; i < PLANET_COUNT; i++) {
+      if (planetIcons[i]) lv_obj_add_flag(planetIcons[i], LV_OBJ_FLAG_HIDDEN);
+    }
+    for (int i = 0; i < n && render[i].visible && planetIcons[(int)render[i].planet_id]; i++) {
+      lv_obj_t* icon = planetIcons[(int)render[i].planet_id];
+      int x = render[i].screen_x - 12;  /* 24/2: center icoon op rand */
+      int y = render[i].screen_y - 20;  /* 40/2: iconen tot 39 px hoog */
+      lv_obj_set_pos(icon, x, y);
+      lv_obj_clear_flag(icon, LV_OBJ_FLAG_HIDDEN);
+    }
+  } else {
+    for (int i = 0; i < PLANET_COUNT; i++) {
+      if (planetIcons[i]) lv_obj_add_flag(planetIcons[i], LV_OBJ_FLAG_HIDDEN);
+    }
+  }
+#endif
 
 #if USE_SPHERE_TERMINATOR
   updateMoonTerminator(angleDeg, fase);
@@ -693,12 +890,10 @@ static void maanstandUpdate() {
   lv_arclabel_set_text(arclabelRise, r);
   lv_arclabel_set_text(arclabelOnder, tijdBuf);
   lv_arclabel_set_text(arclabelSet, s);
-
-  /* Datum boven zodiac (DD-MM-YYYY) */
-  if (labelDate && getLocalTime(&t)) {
-    static char dateBuf[16];
-    snprintf(dateBuf, sizeof(dateBuf), "%02d-%02d-%04d", t.tm_mday, t.tm_mon + 1, t.tm_year + 1900);
-    lv_label_set_text(labelDate, dateBuf);
+  /* Tijd in voetregel: geel als maan zichtbaar (boven horizon), paars/blauw als maan niet zichtbaar */
+  if (arclabelOnder) {
+    lv_color_t tijdKleur = (moon_el_deg > 0.0f) ? lv_color_make(230, 222, 175) : lv_color_hex(0x6B4E9E);
+    lv_obj_set_style_text_color(arclabelOnder, tijdKleur, LV_PART_MAIN);
   }
 
   int zi = getLocalTime(&t) ? zodiacIndex(t.tm_mon + 1, t.tm_mday) : 0;
@@ -733,6 +928,7 @@ void setup() {
   lv_label_set_text(labelStatus, "Connecting WiFi...");
 #endif
   lv_obj_set_style_text_color(labelStatus, lv_color_white(), LV_PART_MAIN);
+  lv_obj_set_style_text_align(labelStatus, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
   lv_obj_center(labelStatus);
 
   for (int i = 0; i < 5; i++) {
@@ -765,11 +961,17 @@ void setup() {
   }
   Serial.println("WiFi OK: " + WiFi.SSID());
 
+  {
+    String ipStr = WiFi.localIP().toString();
 #if UI_LANG_NL
-  lv_label_set_text(labelStatus, "Tijd ophalen...");
+    String msg = String("Tijd ophalen...\nWebUI via:\n") + ipStr;
 #else
-  lv_label_set_text(labelStatus, "Fetching time...");
+    String msg = String("Fetching time...\nWebUI via:\n") + ipStr;
 #endif
+    lv_label_set_text(labelStatus, msg.c_str());
+    lv_obj_center(labelStatus);
+  }
+  uint32_t statusScreenStart = millis();
   for (int i = 0; i < 5; i++) {
     lv_timer_handler();
     delay(10);
@@ -800,10 +1002,17 @@ void setup() {
   Serial.println("Tijd gesynchroniseerd (NL)");
 
   server.on("/", serveData);
+  server.on("/api/data", serveDataJson);
   server.on("/settings", serveSettings);
   server.on("/save", HTTP_POST, handleSave);
   server.begin();
   Serial.println("Webserver gestart op http://" + WiFi.localIP().toString());
+
+  /* Scherm "Tijd ophalen..." + IP minimaal 2 s tonen voordat we naar het hoofdscherm gaan */
+  while ((uint32_t)(millis() - statusScreenStart) < 2000) {
+    lv_timer_handler();
+    delay(10);
+  }
 
   lv_obj_delete(labelStatus);
   labelStatus = NULL;
