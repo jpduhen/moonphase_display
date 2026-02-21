@@ -96,9 +96,7 @@ static lv_obj_t * labelStatus = NULL;
 static lv_obj_t * moonObj = NULL;
 static lv_obj_t * shadowObj = NULL;   // container met donkere maan-foto
 static lv_obj_t * shadowImg = NULL;   // kind: maanbeeld met recolor
-static lv_obj_t * arclabelFaseLeft  = NULL;  // bovenboog: seizoen + spaties
-static lv_obj_t * arclabelFasePct   = NULL;  // bovenboog: percentage (paarsblauw)
-static lv_obj_t * arclabelFaseRight = NULL;  // bovenboog: spaties + fase
+static lv_obj_t * arclabelFase = NULL;   // bovenboog: seizoen, %, fase (gele maantint)
 static lv_obj_t * arclabelRise  = NULL;  // maan opkomst HH:MM @ 225° (links-onder)
 static lv_obj_t * arclabelOnder = NULL;  // huidige tijd HH:MM:SS @ 180° (onder, midden)
 static lv_obj_t * arclabelSet   = NULL;  // maan ondergang HH:MM @ 135° (rechts-onder)
@@ -503,71 +501,37 @@ static void maanstandUI(lv_obj_t * screen) {
   lv_obj_clear_flag(shadowImg, LV_OBJ_FLAG_SCROLLABLE);
 #endif
 
-  // Bovenste regel: "Seizoen - X% - Maanfase" (Wicca + illuminatie + fase), gebogen BOVENAAN.
+  // Bovenste regel: "Seizoen - DD-MM-YY - Maanfase", gebogen BOVENAAN.
   bool showDate, showZodiac, langNL;
   getDisplayPrefs(showDate, showZodiac, langNL);
   const char* const* faseNamen = langNL ? faseNamenNL : faseNamenEN;
+  static char bovenBuf[56];
   struct tm t;
   int si = 0;
   if (getLocalTime(&t)) si = seizoenIndex(t.tm_mon + 1, t.tm_mday);
-  static char bovenLeft[24], bovenPct[8], bovenRight[24];
-  snprintf(bovenLeft, sizeof(bovenLeft), "%s   ", seizoenNamen[si]);
-  snprintf(bovenPct, sizeof(bovenPct), "%.0f%%", illumPct);
-  snprintf(bovenRight, sizeof(bovenRight), "   %s", faseNamen[fi]);
+  if (getLocalTime(&t))
+    snprintf(bovenBuf, sizeof(bovenBuf), "%s   %02d-%02d-%02d   %s", seizoenNamen[si], t.tm_mday, t.tm_mon + 1, (t.tm_year + 1900) % 100, faseNamen[fi]);
+  else
+    snprintf(bovenBuf, sizeof(bovenBuf), "%s   --/--/--   %s", seizoenNamen[si], faseNamen[fi]);
 
-  arclabelFaseLeft = lv_arclabel_create(screen);
-  lv_obj_set_size(arclabelFaseLeft, 240, 240);
-  lv_obj_set_style_bg_opa(arclabelFaseLeft, LV_OPA_TRANSP, LV_PART_MAIN);
-  lv_obj_set_style_border_width(arclabelFaseLeft, 0, LV_PART_MAIN);
-  lv_obj_set_style_pad_all(arclabelFaseLeft, 0, LV_PART_MAIN);
-  lv_obj_set_style_radius(arclabelFaseLeft, 0, LV_PART_MAIN);
-  lv_obj_set_style_text_color(arclabelFaseLeft, arcLabelColor, LV_PART_MAIN);
-  lv_obj_set_style_text_font(arclabelFaseLeft, &lv_font_montserrat_20, LV_PART_MAIN);
-  lv_arclabel_set_text(arclabelFaseLeft, bovenLeft);
-  lv_arclabel_set_angle_start(arclabelFaseLeft, 180);
-  lv_arclabel_set_angle_size(arclabelFaseLeft, 65);
-  lv_arclabel_set_radius(arclabelFaseLeft, 95);
-  lv_arclabel_set_offset(arclabelFaseLeft, 0);
-  lv_arclabel_set_dir(arclabelFaseLeft, LV_ARCLABEL_DIR_CLOCKWISE);
-  lv_arclabel_set_text_vertical_align(arclabelFaseLeft, LV_ARCLABEL_TEXT_ALIGN_TRAILING);
-  lv_arclabel_set_text_horizontal_align(arclabelFaseLeft, LV_ARCLABEL_TEXT_ALIGN_CENTER);
-  lv_obj_center(arclabelFaseLeft);
-
-  arclabelFasePct = lv_arclabel_create(screen);
-  lv_obj_set_size(arclabelFasePct, 240, 240);
-  lv_obj_set_style_bg_opa(arclabelFasePct, LV_OPA_TRANSP, LV_PART_MAIN);
-  lv_obj_set_style_border_width(arclabelFasePct, 0, LV_PART_MAIN);
-  lv_obj_set_style_pad_all(arclabelFasePct, 0, LV_PART_MAIN);
-  lv_obj_set_style_radius(arclabelFasePct, 0, LV_PART_MAIN);
-  lv_obj_set_style_text_color(arclabelFasePct, lv_color_hex(0x6B4E9E), LV_PART_MAIN);  // paarsblauw
-  lv_obj_set_style_text_font(arclabelFasePct, &lv_font_montserrat_20, LV_PART_MAIN);
-  lv_arclabel_set_text(arclabelFasePct, bovenPct);
-  lv_arclabel_set_angle_start(arclabelFasePct, 245);
-  lv_arclabel_set_angle_size(arclabelFasePct, 50);
-  lv_arclabel_set_radius(arclabelFasePct, 95);
-  lv_arclabel_set_offset(arclabelFasePct, 0);
-  lv_arclabel_set_dir(arclabelFasePct, LV_ARCLABEL_DIR_CLOCKWISE);
-  lv_arclabel_set_text_vertical_align(arclabelFasePct, LV_ARCLABEL_TEXT_ALIGN_TRAILING);
-  lv_arclabel_set_text_horizontal_align(arclabelFasePct, LV_ARCLABEL_TEXT_ALIGN_CENTER);
-  lv_obj_center(arclabelFasePct);
-
-  arclabelFaseRight = lv_arclabel_create(screen);
-  lv_obj_set_size(arclabelFaseRight, 240, 240);
-  lv_obj_set_style_bg_opa(arclabelFaseRight, LV_OPA_TRANSP, LV_PART_MAIN);
-  lv_obj_set_style_border_width(arclabelFaseRight, 0, LV_PART_MAIN);
-  lv_obj_set_style_pad_all(arclabelFaseRight, 0, LV_PART_MAIN);
-  lv_obj_set_style_radius(arclabelFaseRight, 0, LV_PART_MAIN);
-  lv_obj_set_style_text_color(arclabelFaseRight, arcLabelColor, LV_PART_MAIN);
-  lv_obj_set_style_text_font(arclabelFaseRight, &lv_font_montserrat_20, LV_PART_MAIN);
-  lv_arclabel_set_text(arclabelFaseRight, bovenRight);
-  lv_arclabel_set_angle_start(arclabelFaseRight, 295);
-  lv_arclabel_set_angle_size(arclabelFaseRight, 65);
-  lv_arclabel_set_radius(arclabelFaseRight, 95);
-  lv_arclabel_set_offset(arclabelFaseRight, 0);
-  lv_arclabel_set_dir(arclabelFaseRight, LV_ARCLABEL_DIR_CLOCKWISE);
-  lv_arclabel_set_text_vertical_align(arclabelFaseRight, LV_ARCLABEL_TEXT_ALIGN_TRAILING);
-  lv_arclabel_set_text_horizontal_align(arclabelFaseRight, LV_ARCLABEL_TEXT_ALIGN_CENTER);
-  lv_obj_center(arclabelFaseRight);
+  arclabelFase = lv_arclabel_create(screen);
+  lv_obj_set_size(arclabelFase, 240, 240);
+  lv_obj_set_style_bg_opa(arclabelFase, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(arclabelFase, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(arclabelFase, 0, LV_PART_MAIN);
+  lv_obj_set_style_radius(arclabelFase, 0, LV_PART_MAIN);
+  lv_obj_set_style_text_color(arclabelFase, arcLabelColor, LV_PART_MAIN);
+  lv_obj_set_style_text_font(arclabelFase, &lv_font_montserrat_20, LV_PART_MAIN);
+  lv_arclabel_set_text(arclabelFase, bovenBuf);
+  /* Boog gecentreerd op top (270°): start = 270 - size/2. Size 220° geeft ruimte voor lange teksten. */
+  lv_arclabel_set_angle_start(arclabelFase, 160);   // 270 - 110 = 160
+  lv_arclabel_set_angle_size(arclabelFase, 220);
+  lv_arclabel_set_radius(arclabelFase, 95);
+  lv_arclabel_set_offset(arclabelFase, 0);
+  lv_arclabel_set_dir(arclabelFase, LV_ARCLABEL_DIR_CLOCKWISE);
+  lv_arclabel_set_text_vertical_align(arclabelFase, LV_ARCLABEL_TEXT_ALIGN_TRAILING);
+  lv_arclabel_set_text_horizontal_align(arclabelFase, LV_ARCLABEL_TEXT_ALIGN_CENTER);
+  lv_obj_center(arclabelFase);
 
   // Voetregel: drie gebogen labels. LVGL 0°=rechts, 90°=onder. User top=0 → 225° links-onder, 180° onder, 135° rechts-onder.
   const char* r = (riseStr[0]) ? riseStr : "--:--";
@@ -673,9 +637,9 @@ static void maanstandUI(lv_obj_t * screen) {
 
 static void maanstandUpdate() {
 #if USE_SPHERE_TERMINATOR
-  if (!arclabelFaseLeft || !arclabelFasePct || !arclabelFaseRight || !arclabelRise || !arclabelOnder || !arclabelSet || !moonObj) return;
+  if (!arclabelFase || !arclabelRise || !arclabelOnder || !arclabelSet || !moonObj) return;
 #else
-  if (!arclabelFaseLeft || !arclabelFasePct || !arclabelFaseRight || !arclabelRise || !arclabelOnder || !arclabelSet || !shadowObj || !shadowImg) return;
+  if (!arclabelFase || !arclabelRise || !arclabelOnder || !arclabelSet || !shadowObj || !shadowImg) return;
 #endif
   float illumPct, leeftijd, fase, angleDeg;
   int fi;
@@ -710,16 +674,15 @@ static void maanstandUpdate() {
   lv_obj_set_pos(shadowImg, imgOx, imgOy);
 #endif
 
-  static char bovenLeft[24], bovenPct[8], bovenRight[24];
+  static char bovenBuf[56];
   struct tm t;
   int si = 0;
   if (getLocalTime(&t)) si = seizoenIndex(t.tm_mon + 1, t.tm_mday);
-  snprintf(bovenLeft, sizeof(bovenLeft), "%s   ", seizoenNamen[si]);
-  snprintf(bovenPct, sizeof(bovenPct), "%.0f%%", illumPct);
-  snprintf(bovenRight, sizeof(bovenRight), "   %s", faseNamen[fi]);
-  lv_arclabel_set_text(arclabelFaseLeft, bovenLeft);
-  lv_arclabel_set_text(arclabelFasePct, bovenPct);
-  lv_arclabel_set_text(arclabelFaseRight, bovenRight);
+  if (getLocalTime(&t))
+    snprintf(bovenBuf, sizeof(bovenBuf), "%s   %02d-%02d-%02d   %s", seizoenNamen[si], t.tm_mday, t.tm_mon + 1, (t.tm_year + 1900) % 100, faseNamen[fi]);
+  else
+    snprintf(bovenBuf, sizeof(bovenBuf), "%s   --/--/--   %s", seizoenNamen[si], faseNamen[fi]);
+  lv_arclabel_set_text(arclabelFase, bovenBuf);
 
   /* Voetregel: opkomst @ 225°, huidige tijd @ 180°, ondergang @ 135° */
   const char* r = (riseStr[0]) ? riseStr : "--:--";
