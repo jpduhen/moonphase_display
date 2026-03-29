@@ -46,9 +46,25 @@ static volatile uint8_t wifiLastDisconnectReason = 0;
 static volatile int32_t wifiLastDisconnectRssi = 0;
 static uint32_t wifiLastDiagPrintMs = 0;
 
+// Korte mapping van veelvoorkomende ESP32 disconnect reason-codes (IDF/Arduino varianten):
+// 2=AUTH_EXPIRE, 15=4WAY_HANDSHAKE_TIMEOUT, 200=BEACON_TIMEOUT, 201=NO_AP_FOUND, 202=AUTH_FAIL.
+// Let op: exacte set kan per core-versie verschillen; onbekende code -> "onbekend".
+static const char* wifiDisconnectReasonText(uint8_t reason) {
+  switch (reason) {
+    case 2:   return "auth verlopen";
+    case 15:  return "4-way handshake timeout";
+    case 200: return "beacon timeout";
+    case 201: return "geen AP gevonden";
+    case 202: return "auth mislukt";
+    case 203: return "assoc mislukt";
+    case 204: return "handshake timeout";
+    default:  return "onbekend";
+  }
+}
+
 static void logWifiDiagSnapshot(const char* tag) {
   wl_status_t st = WiFi.status();
-  Serial.printf("[WiFiDiag] %s | status=%d ssid=\"%s\" ip=%s ch=%d rssi=%d reconnects=%lu lastReason=%u lastDiscRssi=%d\n",
+  Serial.printf("[WiFiDiag] %s | status=%d ssid=\"%s\" ip=%s ch=%d rssi=%d reconnects=%lu lastReason=%u (%s) lastDiscRssi=%d\n",
                 tag ? tag : "-",
                 (int)st,
                 WiFi.SSID().c_str(),
@@ -57,6 +73,7 @@ static void logWifiDiagSnapshot(const char* tag) {
                 (int)WiFi.RSSI(),
                 (unsigned long)wifiReconnectAttempts,
                 (unsigned int)wifiLastDisconnectReason,
+                wifiDisconnectReasonText(wifiLastDisconnectReason),
                 (int)wifiLastDisconnectRssi);
 }
 
@@ -72,8 +89,9 @@ static void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
       wifiReconnectAttempts++;
       wifiLastDisconnectReason = info.wifi_sta_disconnected.reason;
       wifiLastDisconnectRssi = WiFi.RSSI();
-      Serial.printf("[WiFiDiag] EVENT: STA_DISCONNECTED reason=%u rssi=%d reconnectAttempt=%lu\n",
+      Serial.printf("[WiFiDiag] EVENT: STA_DISCONNECTED reason=%u (%s) rssi=%d reconnectAttempt=%lu\n",
                     (unsigned int)wifiLastDisconnectReason,
+                    wifiDisconnectReasonText(wifiLastDisconnectReason),
                     (int)wifiLastDisconnectRssi,
                     (unsigned long)wifiReconnectAttempts);
       break;
