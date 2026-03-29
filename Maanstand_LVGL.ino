@@ -36,8 +36,56 @@ using namespace fs;       // Zorgt dat FS in scope is voor WebServer.h
 // NL: wintertijd UTC+1, zomertijd UTC+2; expliciete offset voor CEST (sommige ESP32-cores)
 #define TZ_NEDERLAND "CET-1CEST-2,M3.5.0,M10.5.0/3"
 #define DEFAULT_TZ   TZ_NEDERLAND
+#define WIFI_DIAG_LOG 1   // 1 = extra WiFi diagnose-logs (RSSI, kanaal, disconnect-reason, reconnect-attempts)
 
 static WebServer server(80);
+
+#if WIFI_DIAG_LOG
+static volatile uint32_t wifiReconnectAttempts = 0;
+static volatile uint8_t wifiLastDisconnectReason = 0;
+static volatile int32_t wifiLastDisconnectRssi = 0;
+static uint32_t wifiLastDiagPrintMs = 0;
+
+static void logWifiDiagSnapshot(const char* tag) {
+  wl_status_t st = WiFi.status();
+  Serial.printf("[WiFiDiag] %s | status=%d ssid=\"%s\" ip=%s ch=%d rssi=%d reconnects=%lu lastReason=%u lastDiscRssi=%d\n",
+                tag ? tag : "-",
+                (int)st,
+                WiFi.SSID().c_str(),
+                WiFi.localIP().toString().c_str(),
+                (int)WiFi.channel(),
+                (int)WiFi.RSSI(),
+                (unsigned long)wifiReconnectAttempts,
+                (unsigned int)wifiLastDisconnectReason,
+                (int)wifiLastDisconnectRssi);
+}
+
+static void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
+  switch (event) {
+    case ARDUINO_EVENT_WIFI_STA_CONNECTED:
+      Serial.printf("[WiFiDiag] EVENT: STA_CONNECTED ssid=\"%s\" ch=%d\n", WiFi.SSID().c_str(), (int)WiFi.channel());
+      break;
+    case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+      logWifiDiagSnapshot("EVENT: STA_GOT_IP");
+      break;
+    case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+      wifiReconnectAttempts++;
+      wifiLastDisconnectReason = info.wifi_sta_disconnected.reason;
+      wifiLastDisconnectRssi = WiFi.RSSI();
+      Serial.printf("[WiFiDiag] EVENT: STA_DISCONNECTED reason=%u rssi=%d reconnectAttempt=%lu\n",
+                    (unsigned int)wifiLastDisconnectReason,
+                    (int)wifiLastDisconnectRssi,
+                    (unsigned long)wifiReconnectAttempts);
+      break;
+    case ARDUINO_EVENT_WIFI_AP_START:
+      Serial.printf("[WiFiDiag] EVENT: AP_START ssid=\"%s\" ip=%s ch=%d\n",
+                    WIFI_AP_NAAM, WiFi.softAPIP().toString().c_str(), (int)WiFi.channel());
+      break;
+    default:
+      break;
+  }
+}
+#endif
 
 /** UI-taal: 1 = Nederlands, 0 = English (compile-time default; runtime overschrijfbaar via web-instellingen) */
 #define UI_LANG_NL 1
@@ -908,6 +956,10 @@ void setup() {
   Serial.begin(115200);
   delay(500);
   Serial.println("Maanstand LVGL – start");
+#if WIFI_DIAG_LOG
+  WiFi.onEvent(onWiFiEvent);
+  Serial.println("[WiFiDiag] Diagnose-logmodus actief");
+#endif
 
   lv_init();
   lv_tick_set_cb(my_tick);
@@ -940,6 +992,7 @@ void setup() {
   }
 
   WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
   Preferences prefs;
   prefs.begin(PREF_NAAM, true);
   paramLat.setValue(prefs.getString("lat", DEFAULT_LAT).c_str(), 12);
@@ -951,7 +1004,15 @@ void setup() {
   wm.addParameter(&paramLon);
   wm.setSaveParamsCallback(saveParamsCallback);
   wm.setConfigPortalBlocking(true);
+  wm.setConfigPortalChannel(1);   // Betere vindbaarheid van AP op telefoons die kanaal 12/13 niet tonen
+  wm.setAPClientCheck(true);
   bool connected = wm.autoConnect(WIFI_AP_NAAM);
+  if (!connected) {
+    // Extra fallback: forceer AP-only captive portal wanneer autoConnect niet doorloopt.
+    Serial.println("AutoConnect mislukt, fallback naar AP-only portal...");
+    WiFi.mode(WIFI_AP);
+    connected = wm.startConfigPortal(WIFI_AP_NAAM);
+  }
   if (!connected) {
 #if UI_LANG_NL
     lv_label_set_text(labelStatus, "Geen WiFi");
@@ -963,6 +1024,9 @@ void setup() {
     return;
   }
   Serial.println("WiFi OK: " + WiFi.SSID());
+#if WIFI_DIAG_LOG
+  logWifiDiagSnapshot("Na connect");
+#endif
 
   {
     String ipStr = WiFi.localIP().toString();
@@ -1028,6 +1092,12 @@ void setup() {
 void loop() {
   server.handleClient();
   lv_timer_handler();
+#if WIFI_DIAG_LOG
+  if (millis() - wifiLastDiagPrintMs >= 30000) {
+    wifiLastDiagPrintMs = millis();
+    logWifiDiagSnapshot("Periodiek");
+  }
+#endif
   static uint32_t last = 0;
   if (millis() - last >= 1000) {   // elke seconde scherm verversen, seconden lopen mee
     last = millis();
