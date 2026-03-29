@@ -1022,6 +1022,7 @@ void setup() {
   wm.addParameter(&paramLon);
   wm.setSaveParamsCallback(saveParamsCallback);
   wm.setConfigPortalBlocking(true);
+  wm.setConfigPortalChannel(1);   // Betere vindbaarheid van AP op telefoons die kanaal 12/13 niet tonen
   wm.setAPClientCheck(true);
   bool connected = wm.autoConnect(WIFI_AP_NAAM);
   if (!connected) {
